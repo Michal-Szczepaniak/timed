@@ -25,7 +25,9 @@
 ***************************************************************************/
 #include <sstream>
 
-#include <pcrecpp.h>
+#define PCRE2_CODE_UNIT_WIDTH 8
+
+#include <pcre2.h>
 
 #include "../common/log.h"
 #include "../lib/aliases.h"
@@ -70,12 +72,26 @@ static void copy_recr(const recurrence_io_t &from, recurrence_pattern_t &to)
 
 bool event_t::check_attributes(string &error_message, const attribute_t &a, bool empty_only)
 {
-    static pcrecpp::RE known_keyword
-        = "APPLICATION|TITLE|TEST|COMMAND|USER|CROUP|"
-          "DBUS_SERVICE|DBUS_PATH|DBUS_INTERFACE|DBUS_METHOD|DBUS_SIGNAL|"
-          "PLUGIN|BACKUP";
-    static pcrecpp::RE upper_case = "[A-Z_]+";
-    static pcrecpp::RE app_name = "[A-Za-z_][A-Za-z_0-9]*";
+    static PCRE2_SPTR known_keyword = (PCRE2_SPTR) "APPLICATION|TITLE|TEST|COMMAND|USER|CROUP|"
+                                      "DBUS_SERVICE|DBUS_PATH|DBUS_INTERFACE|DBUS_METHOD|DBUS_SIGNAL|"
+                                                               "PLUGIN|BACKUP";
+    static PCRE2_SPTR upper_case = (PCRE2_SPTR) "[A-Z_]+";
+    static PCRE2_SPTR app_name = (PCRE2_SPTR) "[A-Za-z_][A-Za-z_0-9]*";
+
+    pcre2_code *known_keyword_re = pcre2_compile(known_keyword, PCRE2_ZERO_TERMINATED, 0, NULL, NULL, NULL);
+    if (known_keyword_re == NULL) {
+        return error_message = "TO BE FILLED", false;
+    }
+
+    pcre2_code *upper_case_re = pcre2_compile(upper_case, PCRE2_ZERO_TERMINATED, 0, NULL, NULL, NULL);
+    if (known_keyword_re == NULL) {
+        return error_message = "TO BE FILLED", false;
+    }
+
+    pcre2_code *app_name_re = pcre2_compile(app_name, PCRE2_ZERO_TERMINATED, 0, NULL, NULL, NULL);
+    if (app_name_re == NULL) {
+        return error_message = "TO BE FILLED", false;
+    }
 
     bool app_name_found = false;
 
@@ -86,13 +102,18 @@ bool event_t::check_attributes(string &error_message, const attribute_t &a, bool
             return error_message += ": empty value of attribute '" + it->first + "'", false;
         if (empty_only)
             continue;
-        if (upper_case.FullMatch(it->first)) {
-            if (!known_keyword.FullMatch(it->first))
+
+        PCRE2_SPTR subject = (PCRE2_SPTR) it->first.c_str();
+        pcre2_match_data *known_keyword_match_data = pcre2_match_data_create_from_pattern(known_keyword_re, NULL);
+        pcre2_match_data *upper_case_match_data = pcre2_match_data_create_from_pattern(upper_case_re, NULL);
+        pcre2_match_data *app_name_match_data = pcre2_match_data_create_from_pattern(app_name_re, NULL);
+        if (pcre2_match(upper_case_re, subject, it->first.length(), 0, 0, upper_case_match_data, NULL)) {
+            if (pcre2_match(known_keyword_re, subject, it->first.length(), 0, 0, known_keyword_match_data, NULL) <= 0)
                 return error_message = "unknown upper case event attribute key '" + it->first + "'",
                        false;
             if (it->first == "APPLICATION") {
                 app_name_found = true;
-                if (!app_name.FullMatch(it->second))
+                if (pcre2_match(app_name_re, subject, it->first.length(), 0, 0, app_name_match_data, NULL) <= 0)
                     return error_message = "invalid application name '" + it->second + "'", false;
             }
         }
@@ -723,19 +744,52 @@ void event_t::run_actions(const vector<unsigned> &acts, unsigned begin, unsigned
     string cmd = find_action_attribute("COMMAND", a);
     if (a.flags & ActionFlags::Send_Cookie) {
         log_debug("cmd='%s', COOKIE to be replaced by value", cmd.c_str());
-        using namespace pcrecpp;
-        static RE exp("(<COOKIE>)|\\b(COOKIE)\\b", UTF8());
+        static PCRE2_SPTR pattern = (PCRE2_SPTR) "(<COOKIE>)|\\b(COOKIE)\\b";
+        pcre2_code *pattern_regex = pcre2_compile(pattern, PCRE2_ZERO_TERMINATED, PCRE2_EXTENDED, NULL, NULL, NULL);
+        if (pattern_regex != NULL) {
+            log_error("Compiling regex failed");
+
+            ::exit(100);
+        }
+        pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(pattern_regex, NULL);
         ostringstream decimal;
         decimal << cookie.value();
-        exp.GlobalReplace(decimal.str(), &cmd);
+        string decimal_string = decimal.str();
+        PCRE2_SPTR replacement = (PCRE2_SPTR) decimal_string.c_str();
+
+        PCRE2_SPTR subject = (PCRE2_SPTR) cmd.c_str();
+
+        PCRE2_UCHAR output[1024] = "";
+        PCRE2_SIZE outlen = sizeof(output) / sizeof(PCRE2_UCHAR);
+        pcre2_substitute(pattern_regex, subject, cmd.length(), 0, PCRE2_SUBSTITUTE_GLOBAL | PCRE2_SUBSTITUTE_EXTENDED, match_data, NULL, replacement,
+                         decimal_string.length(), output, &outlen);
+        cmd = (char*) output;
         log_debug("cmd='%s', COOKIE replaced", cmd.c_str());
     }
     if (flags & EventFlags::Trigger_When_Adjusting) {
         string adj = state->machine->transition_time_adjustment.str();
         log_debug("cmd='%s', ADJUSTMENT to be replaced by '%s'", cmd.c_str(), adj.c_str());
-        using namespace pcrecpp;
-        static RE exp("(<ADJUSTMENT>)|\\b(ADJUSTMENT)\\b", UTF8());
-        exp.GlobalReplace(adj, &cmd);
+
+        static PCRE2_SPTR pattern = (PCRE2_SPTR) "(<ADJUSTMENT>)|\\b(ADJUSTMENT)\\b";
+        pcre2_code *pattern_regex = pcre2_compile(pattern, PCRE2_ZERO_TERMINATED, PCRE2_EXTENDED, NULL, NULL, NULL);
+        if (pattern_regex != NULL) {
+            log_error("Compiling regex failed");
+
+            ::exit(100);
+        }
+        pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(pattern_regex, NULL);
+        ostringstream decimal;
+        decimal << cookie.value();
+        string decimal_string = decimal.str();
+        PCRE2_SPTR replacement = (PCRE2_SPTR) decimal_string.c_str();
+
+        PCRE2_SPTR subject = (PCRE2_SPTR) cmd.c_str();
+
+        PCRE2_UCHAR output[1024] = "";
+        PCRE2_SIZE outlen = sizeof(output) / sizeof(PCRE2_UCHAR);
+        pcre2_substitute(pattern_regex, subject, cmd.length(), 0, PCRE2_SUBSTITUTE_GLOBAL | PCRE2_SUBSTITUTE_EXTENDED, match_data, NULL, replacement,
+                         decimal_string.length(), output, &outlen);
+        cmd = (char*) output;
         log_debug("cmd='%s', ADJUSTMENT replaced", cmd.c_str());
     }
     log_info("execuing command line action %u[%d]: '%s'",
